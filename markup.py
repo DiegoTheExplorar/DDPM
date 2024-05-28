@@ -130,8 +130,7 @@ def train(train_dataloader, save_dir, save_model_every, \
 
             """
             take a random timestamp 
-            and introduce gaussian noise to get to that particular noised image at that timestamp
-            cause gaussian distribution is closed under convolution
+            NOTe noise is NOT applied here yet
             """
             timesteps = torch.randint(0, noise_scheduler.num_train_timesteps, (bs,), device=clean_images.device).long()
 
@@ -149,50 +148,122 @@ def train(train_dataloader, save_dir, save_model_every, \
                 m -= 1
 
             """
-            torch.no_grad: gradient isnt being accumualted
+            torch.no_grad: gradient isnt being accumulated cause I am not actually
+            training it yet I guess.
             """
             with torch.no_grad():
-                # Sample noise to add to the images
+                """
+                noise = : generates pure gaussian tensor with the same dimension as the clean image
+                next line: adds noise to the timestamp at timestamp +m
+                """
                 noise = torch.randn(clean_images.shape).to(clean_images.device)
-                # first, sample t + m using Q
                 noisy_images_t_plus_m = noise_scheduler.add_noise(clean_images, noise, timesteps+m)
+
+                #I think this line is useless
                 noisy_images_t_plus_s = noisy_images_t_plus_m
-                # next, roll back to t using P
+                
+                """
+                I pick a random timestamp and an m value. 
+                i start from the noisy image from timestamp+m and
+                try to use my own predictions to predict the image at timestamp
+                """
+
                 for s in range(m):
-                    # predict noise
+                    """
+                    image_decoder: is this unet?
+                    noisy_images_t_plus_s: curr state of image.
+                    what [sample]?
+                    I think that is happening here is I am predicting the noise
+                    that added at this stage
+                    """
                     noise_pred_rollback_s = image_decoder(noisy_images_t_plus_s, timesteps+m-s, encoder_hidden_states, attention_mask=masks)["sample"]
+
+                    """
+                    I get the noise that was added at this curr time timesteps+m-s
+                    """
                     lambs_s, alpha_prod_ts_s = noise_scheduler.get_lambda_and_alpha(timesteps+m-s)
-                    # clean img predicted
+                    
+                    """
+                    here I am removing the noise that model predicted that was added
+                    need clarification on lambs_s.view(-1, 1, 1, 1) and alpha_prod_ts_s.view(-1, 1, 1, 1)
+                    I think its to reshape tensors? but I dont know how
+                    """
                     x_0_pred = (noisy_images_t_plus_s - lambs_s.view(-1, 1, 1, 1) * noise_pred_rollback_s) / alpha_prod_ts_s.view(-1, 1, 1, 1)
+                    """
+                    repeating of creaing pure noise in the dim of clean image
+                    """
                     noise = torch.randn(clean_images.shape).to(clean_images.device)
-                    # get previous step sample
+                    
+                    """
+                    this line does something simialr to one of the lines before just
+                    adds the predicted state/noise of the image to clean image to restart the
+                    process
+                    """
                     noisy_images_t_plus_s_minus_one  = noise_scheduler.add_noise(x_0_pred, noise, timesteps + m-s-1)
-                    # update
+                    #me thinks this is also useless can just one shot bah
                     noisy_images_t_plus_s = noisy_images_t_plus_s_minus_one
+                """
+                this is the iteratively predicted image/state of timestep
+                from timestep +m 
+                """
                 noisy_images_t = noisy_images_t_plus_s
 
             with accelerator.accumulate(image_decoder):
-                # Predict the noise residual
+                """
+                the unet? uses the image at timestep and finds the predicted noise in some kind of tensor representation?
+
+                """
                 noise_pred = image_decoder(noisy_images_t, timesteps, encoder_hidden_states, attention_mask=masks)["sample"]
+                """
+                these 2 lines find the actual noise at timestep to be used later to compare
+                """
                 lambs_t, alpha_prod_ts_t = noise_scheduler.get_lambda_and_alpha(timesteps)
                 noise = (noisy_images_t - alpha_prod_ts_t.view(-1, 1, 1, 1) * clean_images) / lambs_t.view(-1, 1, 1, 1)
-                loss = F.mse_loss(noise_pred, noise)
-                accelerator.backward(loss)
 
+                """
+                calcualates loss based on diff between prediction and noise
+                """
+                loss = F.mse_loss(noise_pred, noise)
+                """
+    Performs the backward pass to compute the gradient of the loss with respect to model parameters.
+    This gradient is then used to adjust the parameters during the optimization step.
+    """
+                accelerator.backward(loss)
+                """
+                prevent graident kaboom 
+                need clarity on paramters
+                """
                 accelerator.clip_grad_norm_(image_decoder.parameters(), clip_grad_norm)
+                """
+                Updates the model parameters using the optimizer (AdamW), which incorporates techniques like weight decay.    """
                 optimizer.step()
+                """
+                Adjusts the learning rate according to a cosine decay schedule. Initially, the learning rate
+                starts at 1e-4 and follows a cosine curve, gradually decreasing towards zero over 100 epochs.
+                The first 500 steps are treated as a warm-up phase where the learning 
+                rate might increase slightly or remain constant to stabilize the initial learning process. 
+                """
                 lr_scheduler.step()
+                """
+                gradient is reset to prevent mixing up of info between batches
+                """
                 optimizer.zero_grad()
-            
+            """
+            updating logs
+            """
             progress_bar.update(1)
             logs = {"loss": loss.detach().item()*gradient_accumulation_steps, "lr": lr_scheduler.get_last_lr()[0], "step": global_step, 'scheduled sampling': disp_str}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
             global_step += 1
+            """
+            bro wants to autosave at every k epochs in case his GPU kaboom
+            """
         if epoch % save_model_every == 0:
             save_model(image_decoder, os.path.join(save_dir, f'model_e{num_epochs}_lr{learning_rate}.pt.{epoch}'))
 
 def main(args):
+
     
     # Check arguments
     assert len(args.scheduled_sampling_weights_start) == len(args.scheduled_sampling_weights_end)
