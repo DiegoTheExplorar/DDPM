@@ -265,8 +265,12 @@ def train(train_dataloader, save_dir, save_model_every, \
 def main(args):
 
     
-    # Check arguments
+    #send halp
     assert len(args.scheduled_sampling_weights_start) == len(args.scheduled_sampling_weights_end)
+    """
+    probabilities cannot be <0 or > 1 and total cannot be > 1
+
+    """
     assert all([0 <= item <= 1 for item in args.scheduled_sampling_weights_start])
     assert all([0 <= item <= 1 for item in args.scheduled_sampling_weights_end])
     assert sum(args.scheduled_sampling_weights_start) <= 1
@@ -306,14 +310,18 @@ def main(args):
     else:
         args.color_channels = 3
 
-    # Load data
+    # Load datas lor idk what args split is
     dataset = load_dataset(args.dataset_name, split=args.split)
+    # random shuffles data so model doesnt pick up on any pattern
     dataset = dataset.shuffle(seed=args.seed1)
    
-    # Load input tokenizer
+    """
+    loads a tokenizer that is appropriate for the model type
+    AutoTokenizer.from_pretrained: part of  HuggingFace transformer library
+    """
     tokenizer = AutoTokenizer.from_pretrained(args.encoder_model_type)
 
-    # Load input encoder
+    # send halp
     text_encoder = AutoModel.from_pretrained(args.encoder_model_type).cuda()
   
     # Preprocess data to form batches
